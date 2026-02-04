@@ -1,0 +1,223 @@
+generator client {
+  provider = "prisma-client-js"
+  // output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// User model to store user information
+model User {
+  id              String    @id @default(cuid())
+  name            String
+  email           String    @unique
+  emailVerified   DateTime?
+  password        String?
+  image           String? // Changed from imageUrl to image
+  tokenIdentifier String?   @unique // This will be handled by NextAuth now
+
+  // Add these two lines for NextAuth
+  accounts Account[]
+  sessions Session[]
+
+  // Keep these existing relations
+  groups              UsersOnGroups[]
+  createdGroups       Group[]         @relation("CreatedByGroup")
+  expensesPaid        Expense[]       @relation("PaidByExpense")
+  expensesCreated     Expense[]       @relation("CreatedByExpense")
+  settlementsPaid     Settlement[]    @relation("PaidBySettlement")
+  settlementsReceived Settlement[]    @relation("ReceivedBySettlement")
+  settlementsCreated  Settlement[]    @relation("CreatedBySettlement")
+  splitsOwed          ExpenseSplit[]
+
+  // Add these new invitation relations
+  sentInvitations     GroupInvitation[] @relation("SentInvitations")
+  receivedInvitations GroupInvitation[] @relation("ReceivedInvitations")
+}
+
+// Add these new models required by NextAuth.js
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Group model for organizing expenses
+model Group {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+
+  // A group has many members (users)
+  members UsersOnGroups[]
+
+  // A group has many expenses
+  expenses Expense[]
+
+  // A group has many settlements
+  settlements Settlement[]
+
+  // Add invitation relation
+  invitations GroupInvitation[]
+
+  // A group is created by one user
+  createdBy       User   @relation("CreatedByGroup", fields: [createdByUserId], references: [id])
+  createdByUserId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// This is the explicit "join table" for the many-to-many relationship between Users and Groups
+model UsersOnGroups {
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  group      Group    @relation(fields: [groupId], references: [id])
+  groupId    String
+  assignedAt DateTime @default(now())
+
+  @@id([userId, groupId])
+}
+
+// New model for managing group invitations
+model GroupInvitation {
+  id        String   @id @default(cuid())
+  email     String
+  token     String   @unique
+  expiresAt DateTime
+
+  // The group being invited to
+  group   Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId String
+
+  // The user who sent the invitation
+  invitedBy       User   @relation("SentInvitations", fields: [invitedByUserId], references: [id])
+  invitedByUserId String
+
+  // Optional: The user who was invited (if they already have an account)
+  invitedUser   User?   @relation("ReceivedInvitations", fields: [invitedUserId], references: [id])
+  invitedUserId String?
+
+  // Status tracking
+  status InvitationStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([email, groupId]) // Prevent duplicate invites to same email for same group
+}
+
+// Enums provide type safety for fields with a limited set of options
+enum SplitType {
+  EQUAL
+  UNEQUAL
+  PERCENTAGE
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  CANCELLED
+}
+
+// Expense model for individual transactions
+model Expense {
+  id          String   @id @default(cuid())
+  description String
+  amount      Float // Use Float for monetary values
+  category    String?
+  date        DateTime
+
+  // Each expense belongs to one group (optional for personal expenses)
+  group   Group?  @relation(fields: [groupId], references: [id])
+  groupId String?
+
+  // The user who paid for the expense
+  paidBy       User   @relation("PaidByExpense", fields: [paidByUserId], references: [id])
+  paidByUserId String
+
+  // The user who created the expense entry
+  createdBy       User   @relation("CreatedByExpense", fields: [createdByUserId], references: [id])
+  createdByUserId String
+
+  // How the expense is split
+  splitType SplitType
+  // The list of individual splits for this expense
+  splits    ExpenseSplit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// This model properly represents the "splits" array from your diagram
+model ExpenseSplit {
+  id String @id @default(cuid())
+
+  // The expense this split belongs to
+  expense   Expense @relation(fields: [expenseId], references: [id])
+  expenseId String
+
+  // The user who owes this portion of the expense
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
+
+  // The amount this user owes
+  amountOwed Float
+}
+
+// Settlement model for recording payments that clear debts
+model Settlement {
+  id     String   @id @default(cuid())
+  amount Float
+  note   String?
+  date   DateTime
+
+  // The settlement occurs within a group
+  group   Group  @relation(fields: [groupId], references: [id])
+  groupId String
+
+  // The user who made the payment
+  paidBy       User   @relation("PaidBySettlement", fields: [paidByUserId], references: [id])
+  paidByUserId String
+
+  // The user who received the payment
+  receivedBy       User   @relation("ReceivedBySettlement", fields: [receivedByUserId], references: [id])
+  receivedByUserId String
+
+  // The user who created the settlement entry
+  createdBy       User   @relation("CreatedBySettlement", fields: [createdByUserId], references: [id])
+  createdByUserId String
+}
