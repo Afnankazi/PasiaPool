@@ -444,8 +444,15 @@ export default function MinimalHero() {
           </div>
         </div>
 
-        <div>
-          <Button className="h-12 mt-12 w-40 text-md  " variant="default">Sign Up Now!</Button>
+        <div className="flex flex-col sm:flex-row gap-4 items-center">
+          <Button className="h-12 mt-12 w-40 text-md" variant="default">Sign Up Now!</Button>
+          <Button 
+            className="h-12 mt-12 w-40 text-md" 
+            variant="outline"
+            onClick={() => window.location.href = '/test-finternet'}
+          >
+            Test Finternet
+          </Button>
         </div>
       </div>
     </div>

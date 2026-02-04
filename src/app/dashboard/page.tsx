@@ -383,6 +383,13 @@ export default function DashboardPage() {
                 <ArrowUpRight className="ml-auto h-4 w-4" />
               </Button>
             </Link>
+            <Link href="/test-finternet">
+              <Button className="w-full justify-start hover:text-white dark:hover:text-green-400  " variant="outline">
+                <DollarSign className="mr-2 h-4 w-4" />
+                Test Finternet Integration
+                <ArrowUpRight className="ml-auto h-4 w-4" />
+              </Button>
+            </Link>
           </CardContent>
         </Card>
 

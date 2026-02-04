@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Plus, Users, Receipt, DollarSign, Calendar, Loader2, Mail, UserPlus } from "lucide-react";
 import { LoaderFive } from "@/components/ui/loader";
+import GroupPaymentIntegration from "@/components/cooper/GroupPaymentIntegration";
 
 type SplitType = 'EQUAL' | 'UNEQUAL' | 'PERCENTAGE';
 
@@ -93,6 +94,7 @@ const GroupDetailPage = () => {
   const groupId = params.id as string;
 
   const [groupData, setGroupData] = useState<GroupData | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -221,6 +223,14 @@ const GroupDetailPage = () => {
       
       try {
         setError(null);
+        
+        // First get current user
+        const userResponse = await fetch('/api/user/me');
+        if (userResponse.ok) {
+          const userData = await userResponse.json();
+          setCurrentUser(userData);
+        }
+        
         const response = await fetch(`/api/groups/${groupId}`);
         
         if (!response.ok) {
@@ -440,6 +450,14 @@ const GroupDetailPage = () => {
           </div>
         </div>
       </div>
+
+      {/* Finternet Payment Integration */}
+      <GroupPaymentIntegration
+        groupId={groupId}
+        groupName={groupData.name}
+        groupMembers={groupData.members}
+        isGroupLeader={groupData.createdByUserId === currentUser?.id}
+      />
 
       {/* Invite Members Section */}
       <Card>

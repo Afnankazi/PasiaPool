@@ -18,6 +18,10 @@ model User {
   password        String?
   image           String? // Changed from imageUrl to image
   tokenIdentifier String?   @unique // This will be handled by NextAuth now
+  
+  // Cooper integration - wallet support
+  walletAddress   String?   @unique
+  phone           String?
 
   // Add these two lines for NextAuth
   accounts Account[]
@@ -36,6 +40,24 @@ model User {
   // Add these new invitation relations
   sentInvitations     GroupInvitation[] @relation("SentInvitations")
   receivedInvitations GroupInvitation[] @relation("ReceivedInvitations")
+
+  // Cooper integration - new relations
+  eventsLed           Event[]           @relation("EventLeader")
+  eventParticipations EventParticipant[]
+  subCategoryParticipations SubCategoryParticipant[]
+  billsUploaded       Bill[]            @relation("BillUploader")
+  billsVerified       Bill[]            @relation("BillVerifier")
+  transactions        Transaction[]
+  authorizationsRequested PaymentAuthorization[] @relation("AuthorizationRequester")
+  authorizationsApproved  PaymentAuthorization[] @relation("AuthorizationApprover")
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([email])
+  @@index([walletAddress])
 }
 
 // Add these new models required by NextAuth.js
@@ -153,6 +175,52 @@ enum InvitationStatus {
   CANCELLED
 }
 
+// Cooper integration - new enums
+enum EventStatus {
+  DRAFT
+  ACTIVE
+  IN_PROGRESS
+  SETTLING
+  SETTLED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  PAID
+  REFUNDED
+  FAILED
+}
+
+enum MilestoneStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+}
+
+enum TransactionType {
+  POOL
+  EXPENSE
+  REFUND
+  SETTLEMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum AuthorizationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
 // Expense model for individual transactions
 model Expense {
   id          String   @id @default(cuid())
@@ -220,4 +288,346 @@ model Settlement {
   // The user who created the settlement entry
   createdBy       User   @relation("CreatedBySettlement", fields: [createdByUserId], references: [id])
   createdByUserId String
+}
+
+// ============================================
+// COOPER INTEGRATION - NEW MODELS
+// ============================================
+
+// Events model - Cooper's main entity (similar to Group but more structured)
+model Event {
+  id          String @id @default(cuid())
+  name        String
+  description String?
+  eventType   String // 'DINNER', 'TRIP', 'MOVIE', 'OTHER'
+  location    String?
+  eventDate   DateTime?
+
+  // Finternet Integration
+  paymentIntentId String? @unique
+  paymentUrl      String?
+
+  // Financial Details
+  estimatedTotal Decimal @default(0.00) @db.Decimal(10, 2)
+  actualTotal    Decimal @default(0.00) @db.Decimal(10, 2)
+  totalPooled    Decimal @default(0.00) @db.Decimal(10, 2)
+
+  // Status
+  status EventStatus @default(DRAFT)
+
+  // Relations
+  leader   User   @relation("EventLeader", fields: [leaderId], references: [id], onDelete: Cascade)
+  leaderId String
+
+  participants    EventParticipant[]
+  subCategories   SubCategory[]
+  bills           Bill[]
+  transactions    Transaction[]
+  authorizations  PaymentAuthorization[]
+  aiEstimates     AiCostEstimate[]
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+
+  // Timestamps
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  settledAt DateTime?
+
+  @@index([leaderId])
+  @@index([status])
+  @@index([paymentIntentId])
+}
+
+// Event participants - who's involved in each event
+model EventParticipant {
+  id String @id @default(cuid())
+
+  // Relations
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId  String
+
+  // Individual Payment Intent (per user)
+  paymentIntentId String? @unique
+  paymentUrl      String?
+
+  // Financial
+  shareAmount        Decimal @default(0.00) @db.Decimal(10, 2) // What they should pay
+  contributionAmount Decimal @default(0.00) @db.Decimal(10, 2) // What they actually paid
+  totalOwed          Decimal @default(0.00) @db.Decimal(10, 2)
+  refundAmount       Decimal @default(0.00) @db.Decimal(10, 2)
+
+  // Status
+  paymentStatus PaymentStatus @default(PENDING)
+
+  // Timestamps
+  joinedAt DateTime  @default(now())
+  paidAt   DateTime?
+
+  @@unique([eventId, userId])
+  @@index([eventId])
+  @@index([userId])
+  @@index([paymentIntentId])
+  @@index([paymentStatus])
+}
+
+// Sub-categories for organizing expenses within events
+model SubCategory {
+  id          String @id @default(cuid())
+  name        String
+  description String?
+
+  // Relations
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String
+
+  // Financial
+  estimatedCost Decimal @default(0.00) @db.Decimal(10, 2)
+  actualCost    Decimal @default(0.00) @db.Decimal(10, 2)
+  percentage    Int     @default(0)
+
+  // Finternet Milestone
+  milestoneId     String?          @unique
+  milestoneIndex  Int?
+  milestoneStatus MilestoneStatus? @default(PENDING)
+
+  // Relations
+  participants SubCategoryParticipant[]
+  bills        Bill[]
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  @@index([eventId])
+  @@index([milestoneId])
+}
+
+// Sub-category participants - who's involved in each sub-category
+model SubCategoryParticipant {
+  id String @id @default(cuid())
+
+  // Relations
+  subCategory   SubCategory @relation(fields: [subCategoryId], references: [id], onDelete: Cascade)
+  subCategoryId String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String
+
+  // Financial
+  shareAmount Decimal @default(0.00) @db.Decimal(10, 2)
+
+  // Timestamps
+  joinedAt DateTime @default(now())
+
+  @@unique([subCategoryId, userId])
+  @@index([subCategoryId])
+  @@index([userId])
+}
+
+// Bills - receipts and expenses with OCR support
+model Bill {
+  id String @id @default(cuid())
+
+  // Relations
+  event         Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId       String
+  subCategory   SubCategory @relation(fields: [subCategoryId], references: [id], onDelete: Cascade)
+  subCategoryId String
+
+  // Bill Details
+  billNumber String?
+  vendorName String?
+  amount     Decimal @db.Decimal(10, 2)
+  currency   String  @default("USD")
+  billDate   DateTime?
+
+  // File Upload
+  imageUrl String?
+  filePath String?
+  fileType String?
+
+  // OCR Data
+  ocrProcessed   Boolean @default(false)
+  ocrData        Json?
+  ocrConfidence  Decimal? @db.Decimal(5, 2)
+
+  // Verification
+  verified   Boolean   @default(false)
+  verifiedAt DateTime?
+
+  // Relations
+  uploadedBy  User   @relation("BillUploader", fields: [uploadedById], references: [id])
+  uploadedById String
+  verifiedBy  User?  @relation("BillVerifier", fields: [verifiedById], references: [id])
+  verifiedById String?
+
+  // Relations
+  authorizations PaymentAuthorization[]
+
+  // Timestamps
+  uploadedAt DateTime @default(now())
+
+  @@index([eventId])
+  @@index([subCategoryId])
+  @@index([uploadedById])
+}
+
+// Transactions - all financial movements
+model Transaction {
+  id String @id @default(cuid())
+
+  // Relations
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String
+  user    User   @relation(fields: [userId], references: [id])
+  userId  String
+
+  // Transaction Details
+  type        TransactionType
+  amount      Decimal @db.Decimal(10, 2)
+  currency    String  @default("USDC")
+  description String?
+
+  // Finternet Integration
+  paymentIntentId String?
+  transactionHash String?
+
+  // Status
+  status TransactionStatus @default(PENDING)
+
+  // Metadata
+  metadata Json?
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  @@index([eventId])
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([paymentIntentId])
+}
+
+// Payment authorizations - approval workflow
+model PaymentAuthorization {
+  id String @id @default(cuid())
+
+  // Relations
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String
+  bill    Bill?  @relation(fields: [billId], references: [id], onDelete: SetNull)
+  billId  String?
+
+  // Authorization Details
+  amount            Decimal @db.Decimal(10, 2)
+  reason            String?
+  requiresApproval Boolean @default(false)
+
+  // Requester & Approver
+  requestedBy  User   @relation("AuthorizationRequester", fields: [requestedById], references: [id])
+  requestedById String
+  approvedBy   User?  @relation("AuthorizationApprover", fields: [approvedById], references: [id])
+  approvedById String?
+
+  // Status
+  status AuthorizationStatus @default(PENDING)
+
+  // Timestamps
+  requestedAt DateTime  @default(now())
+  approvedAt  DateTime?
+  expiresAt   DateTime?
+
+  @@index([eventId])
+  @@index([status])
+}
+
+// AI cost estimates
+model AiCostEstimate {
+  id String @id @default(cuid())
+
+  // Relations
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String
+
+  // Estimate Details
+  eventType        String?
+  location         String?
+  participantCount Int?
+
+  // Estimates (JSON for flexibility)
+  estimates     Json?
+  totalEstimate Decimal? @db.Decimal(10, 2)
+
+  // AI Model Info
+  modelUsed       String?
+  confidenceScore Decimal? @db.Decimal(5, 2)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+
+  @@index([eventId])
+}
+
+// Notifications
+model Notification {
+  id String @id @default(cuid())
+
+  // Relations
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId  String
+  event   Event? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String?
+
+  // Notification Details
+  type    String
+  title   String
+  message String
+
+  // Status
+  readStatus Boolean   @default(false)
+  readAt     DateTime?
+
+  // Action Link
+  actionUrl String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([readStatus])
+  @@index([createdAt])
+}
+
+// Audit logs
+model AuditLog {
+  id String @id @default(cuid())
+
+  // Relations
+  event   Event? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  eventId String?
+  user    User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId  String?
+
+  // Action Details
+  action     String
+  entityType String?
+  entityId   String?
+
+  // Changes
+  oldValue Json?
+  newValue Json?
+
+  // Metadata
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([eventId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
 }
