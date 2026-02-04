@@ -14,11 +14,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Progress } from '@/components/ui/progress';
-import { 
-  CreditCard, 
-  Zap, 
-  CheckCircle, 
-  AlertCircle, 
+import {
+  CreditCard,
+  Zap,
+  CheckCircle,
+  AlertCircle,
   ExternalLink,
   DollarSign,
   Clock,
@@ -53,11 +53,11 @@ interface EventData {
   totalPooled: number;
 }
 
-export default function GroupPaymentIntegration({ 
-  groupId, 
-  groupName, 
-  groupMembers, 
-  isGroupLeader 
+export default function GroupPaymentIntegration({
+  groupId,
+  groupName,
+  groupMembers,
+  isGroupLeader
 }: GroupPaymentIntegrationProps) {
   const [loading, setLoading] = useState(false);
   const [eventData, setEventData] = useState<EventData | null>(null);
@@ -119,11 +119,12 @@ export default function GroupPaymentIntegration({
       console.log('Event creation response:', eventData);
 
       // Then create the payment intent
+      const totalPoolAmount = (parseFloat(amount) * groupMembers.length).toFixed(2);
       const paymentResponse = await fetch(`/api/events/${eventData.event.id}/payment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          amount,
+          amount: totalPoolAmount, // Total pool amount (per person × number of members)
           currency: 'USDC',
           paymentType,
           settlementDestination,
@@ -131,6 +132,7 @@ export default function GroupPaymentIntegration({
             groupId,
             groupName,
             memberCount: groupMembers.length,
+            amountPerPerson: amount, // Store the per-person amount in metadata
           }
         }),
       });
@@ -143,10 +145,10 @@ export default function GroupPaymentIntegration({
 
       const paymentData = await paymentResponse.json();
       console.log('Payment response data:', paymentData);
-      
+
       setEventData(paymentData.event);
       setSuccess('Payment-enabled event created successfully!');
-      
+
       // Refresh the event data to get the latest status
       await checkExistingEvent();
 
@@ -164,15 +166,14 @@ export default function GroupPaymentIntegration({
     setError('');
 
     try {
-      const shareAmount = eventData.estimatedTotal > 0 
-        ? (eventData.estimatedTotal / groupMembers.length).toFixed(2)
-        : '0.00';
-        
+      // Use the original per-person amount that was entered by the user
+      const amountPerPerson = amount; // Each person pays the amount you entered (e.g., 100 USDC)
+
       const response = await fetch(`/api/events/${eventData.id}/participant-payments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          shareAmount,
+          shareAmount: amountPerPerson,
         }),
       });
 
@@ -182,7 +183,7 @@ export default function GroupPaymentIntegration({
 
       const data = await response.json();
       setSuccess(`Created ${data.payments.length} individual payment intents for group members!`);
-      
+
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Failed to create participant payments');
     } finally {
@@ -275,8 +276,8 @@ export default function GroupPaymentIntegration({
               </div>
               <div>
                 <Label>Progress</Label>
-                <Progress 
-                  value={eventData.estimatedTotal > 0 ? (eventData.totalPooled / eventData.estimatedTotal) * 100 : 0} 
+                <Progress
+                  value={eventData.estimatedTotal > 0 ? (eventData.totalPooled / eventData.estimatedTotal) * 100 : 0}
                   className="mt-1"
                 />
               </div>
@@ -292,7 +293,7 @@ export default function GroupPaymentIntegration({
             )}
 
             <div className="flex gap-2">
-              <Button 
+              <Button
                 onClick={createParticipantPayments}
                 disabled={loading}
                 variant="outline"
@@ -301,7 +302,7 @@ export default function GroupPaymentIntegration({
                 <Users className="mr-2 h-4 w-4" />
                 Create Individual Payments
               </Button>
-              <Button 
+              <Button
                 onClick={() => window.open(`/events/${eventData.id}`, '_blank')}
                 variant="outline"
                 className="flex-1"
@@ -372,7 +373,7 @@ export default function GroupPaymentIntegration({
               </div>
 
               <div>
-                <Label htmlFor="amount">Total Amount (USDC)</Label>
+                <Label htmlFor="amount">Amount Per Person (USDC)</Label>
                 <Input
                   id="amount"
                   type="number"
@@ -381,6 +382,9 @@ export default function GroupPaymentIntegration({
                   onChange={(e) => setAmount(e.target.value)}
                   placeholder="100.00"
                 />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Each member will pay this amount
+                </p>
               </div>
 
               <div>
@@ -422,11 +426,11 @@ export default function GroupPaymentIntegration({
                   <span>{groupMembers.length}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Total Amount:</span>
+                  <span>Amount Per Person:</span>
                   <span>{amount ? `$${amount} USDC` : 'Not set'}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Per Member:</span>
+                  <span>Total Pool Amount:</span>
                   <span>
                     {amount ? `$${(parseFloat(amount) / groupMembers.length).toFixed(2)} USDC` : 'Not set'}
                   </span>
@@ -438,8 +442,8 @@ export default function GroupPaymentIntegration({
               </div>
             </div>
 
-            <Button 
-              onClick={createEventFromGroup} 
+            <Button
+              onClick={createEventFromGroup}
               disabled={loading || !amount || !settlementDestination}
               className="w-full"
             >
