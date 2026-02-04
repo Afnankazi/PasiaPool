@@ -9,7 +9,7 @@ import { writeFile, mkdir, unlink } from 'fs/promises';
 import { join } from 'path';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_VISION_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
+const GEMINI_VISION_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
 interface GeminiReceiptAnalysis {
   totalAmount: number;
