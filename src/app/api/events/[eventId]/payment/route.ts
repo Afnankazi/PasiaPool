@@ -30,6 +30,9 @@ export async function POST(
     const body = await request.json();
     const { amount, currency, paymentType, settlementDestination, metadata } = body;
 
+    // Extract amount per person from metadata for clarity
+    const amountPerPerson = metadata?.amountPerPerson || (parseFloat(amount) / (metadata?.memberCount || 1)).toFixed(2);
+
     // Verify user is event leader
     const event = await prisma.event.findUnique({
       where: { id: eventId },
@@ -51,6 +54,7 @@ export async function POST(
       paymentType,
       settlementDestination,
       metadata,
+      amountPerPerson, // Pass the per-person amount
     });
 
     return NextResponse.json(result);

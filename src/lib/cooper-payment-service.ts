@@ -9,11 +9,12 @@ import { EventStatus, PaymentStatus, MilestoneStatus, TransactionType, Transacti
 
 export interface CreateEventPaymentRequest {
   eventId: string;
-  amount: string;
+  amount: string; // Total pool amount
   currency?: string;
   paymentType: 'POOL' | 'MILESTONE' | 'TIME_LOCKED' | 'DELIVERY_VS_PAYMENT';
   settlementDestination: string;
   metadata?: Record<string, any>;
+  amountPerPerson?: string; // Amount each person should pay
 }
 
 export interface CreateMilestonePaymentRequest {
@@ -117,7 +118,11 @@ export class CooperPaymentService {
         description: `Payment intent created for ${event.name}`,
         paymentIntentId: paymentIntent.id,
         status: TransactionStatus.PENDING,
-        metadata: metadata,
+        metadata: {
+          ...metadata,
+          amountPerPerson: request.amountPerPerson,
+          totalPoolAmount: request.amount,
+        },
       },
     });
 
@@ -245,7 +250,15 @@ export class CooperPaymentService {
   /**
    * Create individual payment intents for event participants
    */
-  async createParticipantPayments(eventId: string): Promise<any[]> {
+  async createParticipantPayments(
+    eventId: string, 
+    options?: {
+      currency?: string;
+      paymentType?: 'POOL' | 'MILESTONE' | 'TIME_LOCKED' | 'DELIVERY_VS_PAYMENT';
+      settlementDestination?: string;
+      metadata?: Record<string, any>;
+    }
+  ): Promise<any[]> {
     const event = await prisma.event.findUnique({
       where: { id: eventId },
       include: { participants: { include: { user: true } } }
@@ -256,21 +269,67 @@ export class CooperPaymentService {
     }
 
     const participantPayments = [];
+    const currency = options?.currency || 'USDC';
+    const settlementDestination = options?.settlementDestination || 'event_pool';
+    const paymentType = options?.paymentType || 'POOL';
+
+    // Determine payment intent type based on request
+    let paymentIntentType: 'CONDITIONAL' | 'DELIVERY_VS_PAYMENT' = 'CONDITIONAL';
+    let baseMetadata = {
+      eventId: eventId,
+      eventType: event.eventType,
+      paymentType,
+      ...options?.metadata,
+    };
+
+    if (paymentType === 'MILESTONE') {
+      paymentIntentType = 'DELIVERY_VS_PAYMENT';
+      baseMetadata = {
+        ...baseMetadata,
+        releaseType: 'MILESTONE_LOCKED',
+        autoRelease: true,
+      };
+    } else if (paymentType === 'TIME_LOCKED') {
+      paymentIntentType = 'DELIVERY_VS_PAYMENT';
+      const lockUntil = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60); // 30 days
+      baseMetadata = {
+        ...baseMetadata,
+        releaseType: 'TIME_LOCKED',
+        timeLockUntil: lockUntil.toString(),
+        deliveryPeriod: 30 * 24 * 60 * 60,
+      };
+    } else if (paymentType === 'DELIVERY_VS_PAYMENT') {
+      paymentIntentType = 'DELIVERY_VS_PAYMENT';
+      baseMetadata = {
+        ...baseMetadata,
+        releaseType: 'DELIVERY_PROOF',
+        autoRelease: true,
+        deliveryPeriod: 30 * 24 * 60 * 60, // 30 days
+      };
+    }
 
     for (const participant of event.participants) {
       if (participant.shareAmount > 0) {
+        // Create redirect URLs for success and cancel
+        const baseUrl = process.env.NEXTAUTH_URL || 'http://localhost:3000';
+        const successUrl = `${baseUrl}/api/payment/success?payment_intent_id={{PAYMENT_INTENT_ID}}&group_id=${baseMetadata.groupId}&participant_id=${participant.id}`;
+        const cancelUrl = `${baseUrl}/dashboard/groups/${baseMetadata.groupId}?payment_cancelled=true`;
+
         // Create individual payment intent for participant
         const paymentIntent = await finternetClient.createPaymentIntent({
           amount: participant.shareAmount.toString(),
-          currency: 'USDC',
-          type: 'CONDITIONAL',
+          currency,
+          type: paymentIntentType,
           settlementMethod: 'OFF_RAMP_MOCK',
-          settlementDestination: 'event_pool',
+          settlementDestination,
           description: `${event.name} - ${participant.user.name}`,
           metadata: {
-            eventId: eventId,
+            ...baseMetadata,
             participantId: participant.id,
             userId: participant.userId,
+            participantName: participant.user.name,
+            successUrl,
+            cancelUrl,
           },
         });
 
@@ -281,6 +340,25 @@ export class CooperPaymentService {
             paymentIntentId: paymentIntent.id,
             paymentUrl: paymentIntent.data.paymentUrl,
             paymentStatus: PaymentStatus.PENDING,
+          },
+        });
+
+        // Create transaction record for participant payment
+        await prisma.transaction.create({
+          data: {
+            eventId: eventId,
+            userId: participant.userId,
+            type: TransactionType.POOL,
+            amount: participant.shareAmount,
+            currency,
+            description: `Individual payment for ${event.name} - ${participant.user.name}`,
+            paymentIntentId: paymentIntent.id,
+            status: TransactionStatus.PENDING,
+            metadata: {
+              ...baseMetadata,
+              participantId: participant.id,
+              participantName: participant.user.name,
+            },
           },
         });
 
@@ -331,7 +409,8 @@ export class CooperPaymentService {
 
     // Update participant if it's a participant payment
     const participant = await prisma.eventParticipant.findFirst({
-      where: { paymentIntentId }
+      where: { paymentIntentId },
+      include: { event: true }
     });
 
     if (participant) {
@@ -340,6 +419,24 @@ export class CooperPaymentService {
         data: {
           paymentStatus: PaymentStatus.PAID,
           paidAt: new Date(),
+        }
+      });
+
+      // Update event's totalPooled amount
+      const allParticipants = await prisma.eventParticipant.findMany({
+        where: { eventId: participant.eventId }
+      });
+
+      const totalPooled = allParticipants
+        .filter(p => p.paymentStatus === PaymentStatus.PAID || p.id === participant.id)
+        .reduce((sum, p) => sum + Number(p.shareAmount), 0);
+
+      await prisma.event.update({
+        where: { id: participant.eventId },
+        data: { 
+          totalPooled,
+          // Update status to IN_PROGRESS if this is the first payment
+          ...(participant.event.status === EventStatus.ACTIVE && { status: EventStatus.IN_PROGRESS })
         }
       });
     }
@@ -363,6 +460,26 @@ export class CooperPaymentService {
       where: { paymentIntentId },
       data: { paymentStatus: PaymentStatus.FAILED }
     });
+  }
+
+  /**
+   * Recalculate and update totalPooled for an event
+   */
+  async updateEventTotalPooled(eventId: string): Promise<number> {
+    const participants = await prisma.eventParticipant.findMany({
+      where: { eventId }
+    });
+
+    const totalPooled = participants
+      .filter(p => p.paymentStatus === PaymentStatus.PAID)
+      .reduce((sum, p) => sum + Number(p.shareAmount), 0);
+
+    await prisma.event.update({
+      where: { id: eventId },
+      data: { totalPooled }
+    });
+
+    return totalPooled;
   }
 
   /**

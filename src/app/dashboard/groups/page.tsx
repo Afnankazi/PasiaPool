@@ -11,7 +11,9 @@ import {
   Users, 
   Calendar,
   ArrowRight,
-  UserPlus
+  UserPlus,
+  LogOut,
+  Loader2
 } from "lucide-react";
 import { LoaderFive } from "@/components/ui/loader";
 
@@ -49,6 +51,11 @@ const GroupsPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false);
+  
+  // Leave group states
+  const [leavingGroupId, setLeavingGroupId] = useState<string | null>(null);
+  const [groupToLeave, setGroupToLeave] = useState<Group | null>(null);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
   // Fix hydration issues by ensuring client-only rendering
   useEffect(() => {
@@ -101,6 +108,72 @@ const GroupsPage = () => {
   const handleGroupCreated = (newGroup: Group) => {
     // Add the new group to the local state
     setGroups(prev => [newGroup, ...prev]);
+  };
+
+  // Handle leaving group
+  const handleLeaveGroup = async () => {
+    if (!groupToLeave) return;
+
+    setLeavingGroupId(groupToLeave.id);
+    
+    try {
+      console.log('Attempting to leave group:', groupToLeave.id);
+      const response = await fetch(`/api/groups/${groupToLeave.id}/leave`, {
+        method: 'POST',
+      });
+
+      console.log('Response status:', response.status);
+      console.log('Response ok:', response.ok);
+
+      if (!response.ok) {
+        let errorMessage = 'Failed to leave group';
+        try {
+          const errorData = await response.json();
+          console.log('Error data:', errorData);
+          errorMessage = errorData.error || errorMessage;
+        } catch (parseError) {
+          console.log('Failed to parse error response:', parseError);
+          // If JSON parsing fails, use status text
+          errorMessage = `Server error: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+      console.log('Success result:', result);
+      
+      // Remove the group from the local state
+      setGroups(prev => prev.filter(group => group.id !== groupToLeave.id));
+      
+      // Show success message
+      alert(result.message);
+      
+    } catch (error) {
+      console.error('Error leaving group:', error);
+      alert(error instanceof Error ? error.message : 'Failed to leave group');
+    } finally {
+      setLeavingGroupId(null);
+      setGroupToLeave(null);
+      setShowLeaveConfirm(false);
+    }
+  };
+
+  const confirmLeaveGroup = (group: Group, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent card click
+    
+    // Check if user is creator with multiple members
+    if (group.createdByUserId === session?.user?.id && group.members.length > 1) {
+      alert('Group creators cannot leave groups with other members. Please remove other members first or transfer leadership.');
+      return;
+    }
+    
+    setGroupToLeave(group);
+    setShowLeaveConfirm(true);
+  };
+
+  const cancelLeaveGroup = () => {
+    setGroupToLeave(null);
+    setShowLeaveConfirm(false);
   };
 
   // Prevent hydration mismatch by not rendering until mounted
@@ -174,7 +247,7 @@ const GroupsPage = () => {
           {groups.map((group) => (
             <Card 
               key={group.id} 
-              className="cursor-pointer hover:shadow-lg transition-all duration-200 group"
+              className="cursor-pointer hover:shadow-lg transition-all duration-200 group relative"
               onClick={() => router.push(`/dashboard/groups/${group.id}`)}
             >
               <CardHeader className="pb-4">
@@ -217,16 +290,123 @@ const GroupsPage = () => {
                   <span>Created <ClientDate dateString={group.createdAt} /></span>
                 </div>
                 
-                {/* Creator Badge */}
-                {group.createdByUserId === session?.user?.id && (
-                  <div className="inline-flex items-center gap-1 bg-primary/10 text-primary text-xs px-2 py-1 rounded-full">
-                    <UserPlus className="h-3 w-3" />
-                    Created by you
-                  </div>
-                )}
+                <div className="flex items-center justify-between">
+                  {/* Creator Badge */}
+                  {group.createdByUserId === session?.user?.id ? (
+                    <div className="inline-flex items-center gap-1 bg-primary/10 text-primary text-xs px-2 py-1 rounded-full">
+                      <UserPlus className="h-3 w-3" />
+                      Created by you
+                    </div>
+                  ) : (
+                    <div></div>
+                  )}
+                  
+                  {/* Leave Button - Show on all groups */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => confirmLeaveGroup(group, e)}
+                    disabled={
+                      leavingGroupId === group.id || 
+                      (group.createdByUserId === session?.user?.id && group.members.length > 1)
+                    }
+                    className={`h-8 w-8 p-0 ${
+                      group.createdByUserId === session?.user?.id && group.members.length > 1
+                        ? 'text-gray-400 cursor-not-allowed'
+                        : 'text-red-500 hover:text-red-700 hover:bg-red-50'
+                    }`}
+                    title={
+                      group.createdByUserId === session?.user?.id && group.members.length > 1
+                        ? "Group creators cannot leave groups with other members"
+                        : "Leave group"
+                    }
+                  >
+                    {leavingGroupId === group.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <LogOut className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           ))}
+        </div>
+      )}
+
+      {/* Leave Group Confirmation Dialog */}
+      {showLeaveConfirm && groupToLeave && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-red-600">
+                <LogOut className="h-5 w-5" />
+                Leave Group
+              </CardTitle>
+              <CardDescription>
+                Are you sure you want to leave this group?
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
+                    <span className="text-red-600 font-medium text-sm">
+                      {groupToLeave.name.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="font-medium text-red-900">{groupToLeave.name}</p>
+                    <p className="text-sm text-red-600">{groupToLeave.members.length} members</p>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="text-sm text-muted-foreground">
+                <p><strong>Warning:</strong> After leaving this group, you will:</p>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>Lose access to all group data</li>
+                  <li>Be removed from payment events</li>
+                  <li>No longer see expenses or settlements</li>
+                  <li>Need to be re-invited to rejoin</li>
+                </ul>
+                {groupToLeave.createdByUserId === session?.user?.id && groupToLeave.members.length === 1 && (
+                  <p className="mt-2 text-red-600 font-medium">
+                    As the only member, leaving will delete this group permanently.
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-2 pt-4">
+                <Button
+                  variant="outline"
+                  onClick={cancelLeaveGroup}
+                  className="flex-1"
+                  disabled={leavingGroupId === groupToLeave.id}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={handleLeaveGroup}
+                  className="flex-1"
+                  disabled={leavingGroupId === groupToLeave.id}
+                >
+                  {leavingGroupId === groupToLeave.id ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Leaving...
+                    </>
+                  ) : (
+                    <>
+                      <LogOut className="mr-2 h-4 w-4" />
+                      Leave Group
+                    </>
+                  )}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>

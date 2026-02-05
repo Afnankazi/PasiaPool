@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { 
   Select, 
   SelectContent, 
@@ -14,7 +15,7 @@ import {
   SelectTrigger, 
   SelectValue 
 } from "@/components/ui/select";
-import { Plus, Users, Receipt, DollarSign, Calendar, Loader2, Mail, UserPlus } from "lucide-react";
+import { Plus, Users, Receipt, DollarSign, Calendar, Loader2, Mail, UserPlus, CheckCircle, X, UserMinus, LogOut } from "lucide-react";
 import { LoaderFive } from "@/components/ui/loader";
 import GroupPaymentIntegration from "@/components/cooper/GroupPaymentIntegration";
 
@@ -90,14 +91,29 @@ interface GroupData {
 
 const GroupDetailPage = () => {
   const params = useParams();
+  const searchParams = useSearchParams();
   const { status } = useSession();
   const groupId = params.id as string;
+
+  // Check for payment success parameters
+  const paymentSuccess = searchParams.get('payment_success');
+  const paymentAmount = searchParams.get('amount');
+  const paymentCancelled = searchParams.get('payment_cancelled');
 
   const [groupData, setGroupData] = useState<GroupData | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Payment success message state
+  const [showPaymentSuccess, setShowPaymentSuccess] = useState(false);
+  const [showPaymentCancelled, setShowPaymentCancelled] = useState(false);
+  
+  // Member removal states
+  const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
+  const [memberToRemove, setMemberToRemove] = useState<GroupMember | null>(null);
+  const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
   
   // Invitation states
   const [isInviting, setIsInviting] = useState(false);
@@ -216,55 +232,124 @@ const GroupDetailPage = () => {
     }
   };
 
-  // Fetch group data from API
-  useEffect(() => {
-    const fetchGroupData = async () => {
-      if (status !== 'authenticated') return;
-      
-      try {
-        setError(null);
-        
-        // First get current user
-        const userResponse = await fetch('/api/user/me');
-        if (userResponse.ok) {
-          const userData = await userResponse.json();
-          setCurrentUser(userData);
-        }
-        
-        const response = await fetch(`/api/groups/${groupId}`);
-        
-        if (!response.ok) {
-          if (response.status === 404) {
-            setError('Group not found');
-          } else if (response.status === 401) {
-            setError('Unauthorized access');
-          } else {
-            setError('Failed to load group data');
-          }
-          return;
-        }
-        
-        const data: GroupData = await response.json();
-        setGroupData(data);
-        
-        // Set the first member as default payer
-        if (data.members.length > 0) {
-          setExpenseForm(prev => ({ 
-            ...prev, 
-            paidByUserId: data.members[0].user.id 
-          }));
-          
-          // Initialize user splits
-          initializeUserSplits(data.members, 'EQUAL');
-        }
-      } catch (error) {
-        console.error('Error fetching group data:', error);
-        setError('Failed to load group data');
-      } finally {
-        setIsLoading(false);
-      }
-    };
+  // Handle member removal
+  const handleRemoveMember = async () => {
+    if (!memberToRemove || !groupData) return;
 
+    setRemovingMemberId(memberToRemove.id);
+    
+    try {
+      const response = await fetch(`/api/groups/${groupId}/members/${memberToRemove.id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to remove member');
+      }
+
+      const result = await response.json();
+      
+      // Update group data by removing the member
+      setGroupData(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          members: prev.members.filter(member => member.id !== memberToRemove.id)
+        };
+      });
+
+      // Show success message
+      alert(`${result.removedMember.userName} has been removed from the group`);
+      
+    } catch (error) {
+      console.error('Error removing member:', error);
+      alert(error instanceof Error ? error.message : 'Failed to remove member');
+    } finally {
+      setRemovingMemberId(null);
+      setMemberToRemove(null);
+      setShowRemoveConfirm(false);
+    }
+  };
+
+  const confirmRemoveMember = (member: GroupMember) => {
+    setMemberToRemove(member);
+    setShowRemoveConfirm(true);
+  };
+
+  const cancelRemoveMember = () => {
+    setMemberToRemove(null);
+    setShowRemoveConfirm(false);
+  };
+
+  // Handle payment success/cancellation messages
+  useEffect(() => {
+    if (paymentSuccess === 'true') {
+      setShowPaymentSuccess(true);
+      // Auto-hide after 10 seconds
+      setTimeout(() => setShowPaymentSuccess(false), 10000);
+      
+      // Refresh group data to show updated payment status
+      if (groupData) {
+        fetchGroupData();
+      }
+    }
+    if (paymentCancelled === 'true') {
+      setShowPaymentCancelled(true);
+      // Auto-hide after 5 seconds
+      setTimeout(() => setShowPaymentCancelled(false), 5000);
+    }
+  }, [paymentSuccess, paymentCancelled]);
+
+  // Fetch group data from API
+  const fetchGroupData = async () => {
+    if (status !== 'authenticated') return;
+    
+    try {
+      setError(null);
+      
+      // First get current user
+      const userResponse = await fetch('/api/user/me');
+      if (userResponse.ok) {
+        const userData = await userResponse.json();
+        setCurrentUser(userData);
+      }
+      
+      const response = await fetch(`/api/groups/${groupId}`);
+      
+      if (!response.ok) {
+        if (response.status === 404) {
+          setError('Group not found');
+        } else if (response.status === 401) {
+          setError('Unauthorized access');
+        } else {
+          setError('Failed to load group data');
+        }
+        return;
+      }
+      
+      const data: GroupData = await response.json();
+      setGroupData(data);
+      
+      // Set the first member as default payer
+      if (data.members.length > 0) {
+        setExpenseForm(prev => ({ 
+          ...prev, 
+          paidByUserId: data.members[0].user.id 
+        }));
+        
+        // Initialize user splits
+        initializeUserSplits(data.members, 'EQUAL');
+      }
+    } catch (error) {
+      console.error('Error fetching group data:', error);
+      setError('Failed to load group data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
     fetchGroupData();
   }, [groupId, status]);
 
@@ -420,6 +505,125 @@ const GroupDetailPage = () => {
 
   return (
     <div className="container  max-w-6xl mx-auto p-6 space-y-6">
+      {/* Payment Success/Cancellation Messages */}
+      {showPaymentSuccess && (
+        <Alert className="border-green-200 bg-green-50">
+          <CheckCircle className="h-4 w-4 text-green-600" />
+          <AlertDescription className="text-green-800">
+            <div className="flex items-center justify-between">
+              <div>
+                <strong>Payment Successful!</strong>
+                {paymentAmount && (
+                  <span className="ml-2">
+                    Your payment of ${paymentAmount} USDC has been processed successfully.
+                  </span>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowPaymentSuccess(false)}
+                className="text-green-600 hover:text-green-800"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {showPaymentCancelled && (
+        <Alert variant="destructive">
+          <X className="h-4 w-4" />
+          <AlertDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <strong>Payment Cancelled</strong>
+                <span className="ml-2">Your payment was cancelled. You can try again anytime.</span>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowPaymentCancelled(false)}
+                className="text-red-600 hover:text-red-800"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Member Removal Confirmation Dialog */}
+      {showRemoveConfirm && memberToRemove && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-red-600">
+                <UserMinus className="h-5 w-5" />
+                Remove Member
+              </CardTitle>
+              <CardDescription>
+                Are you sure you want to remove this member from the group?
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
+                    <span className="text-red-600 font-medium text-sm">
+                      {memberToRemove.user.name.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="font-medium text-red-900">{memberToRemove.user.name}</p>
+                    <p className="text-sm text-red-600">{memberToRemove.user.email}</p>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="text-sm text-muted-foreground">
+                <p><strong>Warning:</strong> This action cannot be undone. The member will:</p>
+                <ul className="list-disc list-inside mt-2 space-y-1">
+                  <li>Lose access to this group</li>
+                  <li>Be removed from any payment events</li>
+                  <li>No longer see group expenses or settlements</li>
+                </ul>
+              </div>
+
+              <div className="flex gap-2 pt-4">
+                <Button
+                  variant="outline"
+                  onClick={cancelRemoveMember}
+                  className="flex-1"
+                  disabled={removingMemberId === memberToRemove.id}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={handleRemoveMember}
+                  className="flex-1"
+                  disabled={removingMemberId === memberToRemove.id}
+                >
+                  {removingMemberId === memberToRemove.id ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Removing...
+                    </>
+                  ) : (
+                    <>
+                      <UserMinus className="mr-2 h-4 w-4" />
+                      Remove Member
+                    </>
+                  )}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* Group Header */}
       <div className="bg-gradient-to-r from-primary/10 to-primary/5 rounded-lg p-6 border">
         <div className="flex items-start justify-between">
@@ -442,9 +646,34 @@ const GroupDetailPage = () => {
             {groupData.members.map((member, idx) => (
               <div 
                 key={idx}
-                className="bg-background border rounded-full px-3 py-1 text-sm"
+                className={`bg-background border rounded-full px-3 py-1 text-sm flex items-center gap-2 ${
+                  member.userId === groupData.createdByUserId 
+                    ? 'border-primary bg-primary/5' 
+                    : ''
+                }`}
               >
-                {member.user.name}
+                <span className="flex items-center gap-1">
+                  {member.user.name}
+                  {member.userId === groupData.createdByUserId && (
+                    <span className="text-xs text-primary font-medium">(Leader)</span>
+                  )}
+                </span>
+                {/* Show remove button only for group leaders and not for the leader themselves */}
+                {groupData.createdByUserId === currentUser?.id && 
+                 member.userId !== groupData.createdByUserId && (
+                  <button
+                    onClick={() => confirmRemoveMember(member)}
+                    disabled={removingMemberId === member.id}
+                    className="text-red-500 hover:text-red-700 hover:bg-red-50 rounded-full p-1 transition-colors"
+                    title={`Remove ${member.user.name} from group`}
+                  >
+                    {removingMemberId === member.id ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <X className="h-3 w-3" />
+                    )}
+                  </button>
+                )}
               </div>
             ))}
           </div>

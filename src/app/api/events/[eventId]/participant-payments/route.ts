@@ -1,11 +1,12 @@
 /**
- * Create Individual Payment Intents for Event Participants
+ * Event Participant Payments API Routes
+ * Handle individual payment intents for event participants
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { cooperPaymentService } from '@/lib/cooper-payment-service';
 import { getServerSession } from 'next-auth';
 import { prisma } from '@/lib/db';
-import { finternetClient } from '@/lib/finternet';
 
 export async function POST(
   request: NextRequest,
@@ -27,12 +28,12 @@ export async function POST(
     }
 
     const body = await request.json();
-    const { shareAmount } = body;
+    const { shareAmount, currency, paymentType, settlementDestination, metadata } = body;
 
     // Verify user is event leader
     const event = await prisma.event.findUnique({
       where: { id: eventId },
-      include: { 
+      include: {
         leader: true,
         participants: { include: { user: true } }
       }
@@ -46,93 +47,61 @@ export async function POST(
       return NextResponse.json({ error: 'Only event leader can create participant payments' }, { status: 403 });
     }
 
-    const participantPayments = [];
+    // Update all participants with the share amount
+    await prisma.eventParticipant.updateMany({
+      where: { eventId: eventId },
+      data: { shareAmount: parseFloat(shareAmount) }
+    });
 
-    // Create individual payment intents for each participant
-    for (const participant of event.participants) {
-      if (parseFloat(shareAmount) > 0) {
-        try {
-          // Create individual payment intent
-          const paymentIntent = await finternetClient.createPaymentIntent({
-            amount: shareAmount,
-            currency: 'USDC',
-            type: 'CONDITIONAL',
-            settlementMethod: 'OFF_RAMP_MOCK',
-            settlementDestination: 'event_pool',
-            description: `${event.name} - ${participant.user.name}`,
-            metadata: {
-              eventId: eventId,
-              participantId: participant.id,
-              userId: participant.userId,
-              groupPayment: true,
-            },
-          });
-
-          // Update participant with payment intent
-          const updatedParticipant = await prisma.eventParticipant.update({
-            where: { id: participant.id },
-            data: {
-              paymentIntentId: paymentIntent.id,
-              paymentUrl: paymentIntent.data.paymentUrl,
-              shareAmount: parseFloat(shareAmount),
-              paymentStatus: 'PENDING',
-            },
-            include: { user: true }
-          });
-
-          // Create transaction record
-          await prisma.transaction.create({
-            data: {
-              eventId: eventId,
-              userId: participant.userId,
-              type: 'POOL',
-              amount: parseFloat(shareAmount),
-              currency: 'USDC',
-              description: `Individual payment for ${event.name}`,
-              paymentIntentId: paymentIntent.id,
-              status: 'PENDING',
-              metadata: {
-                participantId: participant.id,
-                shareAmount: parseFloat(shareAmount),
-              },
-            },
-          });
-
-          participantPayments.push({
-            participant: updatedParticipant,
-            paymentIntent,
-          });
-
-        } catch (error) {
-          console.error(`Failed to create payment for ${participant.user.name}:`, error);
-          // Continue with other participants even if one fails
-        }
-      }
-    }
-
-    // Create notification for participants
-    for (const payment of participantPayments) {
-      await prisma.notification.create({
-        data: {
-          userId: payment.participant.userId,
-          eventId: eventId,
-          type: 'PAYMENT_REQUEST',
-          title: 'Payment Required',
-          message: `Please complete your payment of $${shareAmount} USDC for ${event.name}`,
-          actionUrl: payment.paymentIntent.data.paymentUrl,
-        }
-      });
-    }
+    // Create individual payment intents for all participants
+    const participantPayments = await cooperPaymentService.createParticipantPayments(eventId, {
+      currency: currency || 'USDC',
+      paymentType,
+      settlementDestination,
+      metadata
+    });
 
     return NextResponse.json({
+      success: true,
       payments: participantPayments,
       message: `Created ${participantPayments.length} individual payment intents`
     });
-
   } catch (error) {
     console.error('Create participant payments error:', error);
     return NextResponse.json(
       { error: 'Failed to create participant payments' },
+      { status: 500 }
+    );
+  }
+}
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { eventId: string } }
+) {
+  try {
+    const { eventId } = await params;
+    const session = await getServerSession();
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const participants = await prisma.eventParticipant.findMany({
+      where: { eventId: eventId },
+      include: { user: true },
+      orderBy: { id: 'asc' }
+    });
+
+    return NextResponse.json({
+      participants,
+      totalParticipants: participants.length,
+      paidParticipants: participants.filter(p => p.paymentStatus === 'PAID').length,
+      totalAmount: participants.reduce((sum, p) => sum + Number(p.shareAmount), 0)
+    });
+  } catch (error) {
+    console.error('Get participant payments error:', error);
+    return NextResponse.json(
+      { error: 'Failed to get participant payments' },
       { status: 500 }
     );
   }

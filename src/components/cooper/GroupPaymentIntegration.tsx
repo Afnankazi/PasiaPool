@@ -22,8 +22,7 @@ import {
   ExternalLink,
   DollarSign,
   Clock,
-  Target,
-  Users
+  Target
 } from 'lucide-react';
 
 interface GroupPaymentIntegrationProps {
@@ -51,6 +50,19 @@ interface EventData {
   estimatedTotal: number;
   actualTotal: number;
   totalPooled: number;
+  participants?: Array<{
+    id: string;
+    user: {
+      id: string;
+      name: string;
+      email: string;
+    };
+    shareAmount: number;
+    paymentStatus: string;
+    paymentUrl?: string;
+    paymentIntentId?: string;
+    paidAt?: string;
+  }>;
 }
 
 export default function GroupPaymentIntegration({
@@ -80,7 +92,19 @@ export default function GroupPaymentIntegration({
       const response = await fetch(`/api/groups/${groupId}/event`);
       if (response.ok) {
         const data = await response.json();
-        setEventData(data.event);
+        if (data.event) {
+          // Also fetch participant payment details
+          const eventResponse = await fetch(`/api/events/${data.event.id}`);
+          if (eventResponse.ok) {
+            const eventData = await eventResponse.json();
+            setEventData({
+              ...data.event,
+              participants: eventData.participantPayments
+            });
+          } else {
+            setEventData(data.event);
+          }
+        }
       }
     } catch (error) {
       console.error('Failed to check existing event:', error);
@@ -118,13 +142,12 @@ export default function GroupPaymentIntegration({
       const eventData = await eventResponse.json();
       console.log('Event creation response:', eventData);
 
-      // Then create the payment intent
-      const totalPoolAmount = (parseFloat(amount) * groupMembers.length).toFixed(2);
-      const paymentResponse = await fetch(`/api/events/${eventData.event.id}/payment`, {
+      // Create individual payment intents for each participant
+      const participantPaymentsResponse = await fetch(`/api/events/${eventData.event.id}/participant-payments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          amount: totalPoolAmount, // Total pool amount (per person × number of members)
+          shareAmount: amount, // Per-person amount
           currency: 'USDC',
           paymentType,
           settlementDestination,
@@ -132,22 +155,39 @@ export default function GroupPaymentIntegration({
             groupId,
             groupName,
             memberCount: groupMembers.length,
-            amountPerPerson: amount, // Store the per-person amount in metadata
+            amountPerPerson: amount,
+            totalPoolAmount: (parseFloat(amount) * groupMembers.length).toFixed(2),
           }
         }),
       });
 
-      if (!paymentResponse.ok) {
-        const errorData = await paymentResponse.json();
-        console.error('Payment creation failed:', errorData);
-        throw new Error(errorData.error || 'Failed to create payment intent');
+      if (!participantPaymentsResponse.ok) {
+        const errorData = await participantPaymentsResponse.json();
+        console.error('Participant payments creation failed:', errorData);
+        throw new Error(errorData.error || 'Failed to create individual payment intents');
       }
 
-      const paymentData = await paymentResponse.json();
-      console.log('Payment response data:', paymentData);
+      const participantPaymentsData = await participantPaymentsResponse.json();
+      console.log('Participant payments response:', participantPaymentsData);
 
-      setEventData(paymentData.event);
-      setSuccess('Payment-enabled event created successfully!');
+      // Update event with total estimated amount
+      const totalAmount = (parseFloat(amount) * groupMembers.length).toFixed(2);
+      await fetch(`/api/events/${eventData.event.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          estimatedTotal: parseFloat(totalAmount),
+          status: 'ACTIVE'
+        }),
+      });
+
+      setEventData({
+        ...eventData.event,
+        estimatedTotal: parseFloat(totalAmount),
+        status: 'ACTIVE'
+      });
+      
+      setSuccess(`Created individual payment links for all ${participantPaymentsData.payments.length} group members!`);
 
       // Refresh the event data to get the latest status
       await checkExistingEvent();
@@ -159,37 +199,6 @@ export default function GroupPaymentIntegration({
     }
   };
 
-  const createParticipantPayments = async () => {
-    if (!eventData) return;
-
-    setLoading(true);
-    setError('');
-
-    try {
-      // Use the original per-person amount that was entered by the user
-      const amountPerPerson = amount; // Each person pays the amount you entered (e.g., 100 USDC)
-
-      const response = await fetch(`/api/events/${eventData.id}/participant-payments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          shareAmount: amountPerPerson,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to create participant payments');
-      }
-
-      const data = await response.json();
-      setSuccess(`Created ${data.payments.length} individual payment intents for group members!`);
-
-    } catch (error) {
-      setError(error instanceof Error ? error.message : 'Failed to create participant payments');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   if (!isGroupLeader) {
     return (
@@ -200,7 +209,7 @@ export default function GroupPaymentIntegration({
             Payment Integration
           </CardTitle>
           <CardDescription>
-            Only the group creator can set up payments
+            {eventData ? 'Your payment information' : 'Only the group creator can set up payments'}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -216,13 +225,71 @@ export default function GroupPaymentIntegration({
                 <span>Total Amount:</span>
                 <span className="font-semibold">${eventData.estimatedTotal} USDC</span>
               </div>
-              {eventData.paymentUrl && (
-                <Button asChild className="w-full">
-                  <a href={eventData.paymentUrl} target="_blank" rel="noopener noreferrer">
-                    <ExternalLink className="mr-2 h-4 w-4" />
-                    Complete Payment
-                  </a>
-                </Button>
+              
+              {/* Show current user's payment link */}
+              {eventData.participants && (
+                <div className="space-y-3">
+                  <h4 className="font-medium">Your Payment</h4>
+                  {eventData.participants.map((participant) => (
+                    <div key={participant.id} className="border rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium">{participant.user.name}</span>
+                        <Badge variant={participant.paymentStatus === 'PAID' ? 'default' : 'outline'}>
+                          {participant.paymentStatus}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span>Amount:</span>
+                        <span className="font-semibold">${participant.shareAmount} USDC</span>
+                      </div>
+                      {participant.paymentUrl && participant.paymentStatus !== 'PAID' && (
+                        <div className="space-y-2">
+                          <Button 
+                            className="w-full" 
+                            size="sm"
+                            onClick={() => {
+                              // Store redirect info in localStorage
+                              if (participant.paymentIntentId) {
+                                localStorage.setItem(`payment_redirect_${participant.paymentIntentId}`, JSON.stringify({
+                                  groupId,
+                                  participantId: participant.id,
+                                  amount: participant.shareAmount,
+                                  groupName,
+                                  participantName: participant.user.name
+                                }));
+                              }
+                              // Open payment page
+                              window.open(participant.paymentUrl, '_blank');
+                            }}
+                          >
+                            <ExternalLink className="mr-2 h-4 w-4" />
+                            Pay Now
+                          </Button>
+                          <Button 
+                            asChild 
+                            variant="outline" 
+                            className="w-full" 
+                            size="sm"
+                          >
+                            <a 
+                              href={`/payment/complete?payment_intent_id=${participant.paymentIntentId}&group_id=${groupId}&participant_id=${participant.id}&amount=${participant.shareAmount}&group_name=${encodeURIComponent(groupName)}&participant_name=${encodeURIComponent(participant.user.name)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              Check Payment Status
+                            </a>
+                          </Button>
+                        </div>
+                      )}
+                      {participant.paymentStatus === 'PAID' && participant.paidAt && (
+                        <div className="text-sm text-green-600">
+                          <CheckCircle className="inline mr-1 h-4 w-4" />
+                          Paid on {new Date(participant.paidAt).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}
@@ -272,40 +339,101 @@ export default function GroupPaymentIntegration({
               </div>
               <div>
                 <Label>Amount Pooled</Label>
-                <p className="text-lg">${eventData.totalPooled} USDC</p>
+                <p className="text-lg">
+                  ${eventData.participants 
+                    ? eventData.participants
+                        .filter(p => p.paymentStatus === 'PAID')
+                        .reduce((sum, p) => sum + Number(p.shareAmount), 0)
+                    : 0} USDC
+                </p>
               </div>
               <div>
                 <Label>Progress</Label>
                 <Progress
-                  value={eventData.estimatedTotal > 0 ? (eventData.totalPooled / eventData.estimatedTotal) * 100 : 0}
+                  value={eventData.estimatedTotal > 0 ? 
+                    ((eventData.participants 
+                      ? eventData.participants
+                          .filter(p => p.paymentStatus === 'PAID')
+                          .reduce((sum, p) => sum + Number(p.shareAmount), 0)
+                      : 0) / eventData.estimatedTotal) * 100 : 0}
                   className="mt-1"
                 />
               </div>
             </div>
 
-            {eventData.paymentUrl && (
-              <Button asChild className="w-full">
-                <a href={eventData.paymentUrl} target="_blank" rel="noopener noreferrer">
-                  <ExternalLink className="mr-2 h-4 w-4" />
-                  Open Payment Page
-                </a>
-              </Button>
+            {/* Show all participant payment links */}
+            {eventData.participants && eventData.participants.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="font-medium">Individual Payment Links</h4>
+                <div className="grid gap-3">
+                  {eventData.participants.map((participant) => (
+                    <div key={participant.id} className="border rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium">{participant.user.name}</span>
+                        <Badge variant={participant.paymentStatus === 'PAID' ? 'default' : 'outline'}>
+                          {participant.paymentStatus}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span>Amount:</span>
+                        <span className="font-semibold">${participant.shareAmount} USDC</span>
+                      </div>
+                      {participant.paymentUrl && participant.paymentStatus !== 'PAID' && (
+                        <div className="space-y-2">
+                          <Button 
+                            className="w-full" 
+                            size="sm"
+                            onClick={() => {
+                              // Store redirect info in localStorage
+                              if (participant.paymentIntentId) {
+                                localStorage.setItem(`payment_redirect_${participant.paymentIntentId}`, JSON.stringify({
+                                  groupId,
+                                  participantId: participant.id,
+                                  amount: participant.shareAmount,
+                                  groupName,
+                                  participantName: participant.user.name
+                                }));
+                              }
+                              // Open payment page
+                              window.open(participant.paymentUrl, '_blank');
+                            }}
+                          >
+                            <ExternalLink className="mr-2 h-4 w-4" />
+                            Payment Link
+                          </Button>
+                          <Button 
+                            asChild 
+                            variant="outline" 
+                            className="w-full" 
+                            size="sm"
+                          >
+                            <a 
+                              href={`/payment/complete?payment_intent_id=${participant.paymentIntentId}&group_id=${groupId}&participant_id=${participant.id}&amount=${participant.shareAmount}&group_name=${encodeURIComponent(groupName)}&participant_name=${encodeURIComponent(participant.user.name)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              Check Payment Status
+                            </a>
+                          </Button>
+                        </div>
+                      )}
+                      {participant.paymentStatus === 'PAID' && participant.paidAt && (
+                        <div className="text-sm text-green-600">
+                          <CheckCircle className="inline mr-1 h-4 w-4" />
+                          Paid on {new Date(participant.paidAt).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
 
             <div className="flex gap-2">
               <Button
-                onClick={createParticipantPayments}
-                disabled={loading}
-                variant="outline"
-                className="flex-1"
-              >
-                <Users className="mr-2 h-4 w-4" />
-                Create Individual Payments
-              </Button>
-              <Button
                 onClick={() => window.open(`/events/${eventData.id}`, '_blank')}
                 variant="outline"
-                className="flex-1"
+                className="w-full"
               >
                 <Target className="mr-2 h-4 w-4" />
                 Manage Event
@@ -432,7 +560,7 @@ export default function GroupPaymentIntegration({
                 <div className="flex justify-between">
                   <span>Total Pool Amount:</span>
                   <span>
-                    {amount ? `$${(parseFloat(amount) / groupMembers.length).toFixed(2)} USDC` : 'Not set'}
+                    {amount ? `$${(parseFloat(amount) * groupMembers.length).toFixed(2)} USDC` : 'Not set'}
                   </span>
                 </div>
                 <div className="flex justify-between">

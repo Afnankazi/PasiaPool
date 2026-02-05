@@ -35,6 +35,12 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+  // Suppress console errors in production
+  compiler: {
+    removeConsole: process.env.NODE_ENV === 'production' ? {
+      exclude: ['error'] // Keep error logs but filter them
+    } : false,
+  },
 };
 
 export default nextConfig;
